@@ -1,0 +1,24 @@
+{
+  "name": "gmail-mcp",
+  "version": "1.0.0",
+  "description": "Gmail MCP server for Claude — read, send, search, and manage Gmail via Claude Desktop or Claude Code",
+  "type": "module",
+  "bin": {
+    "gmail-mcp": "./src/index.js",
+    "gmail-mcp-auth": "./src/auth.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "auth": "node src/auth.js"
+  },
+  "keywords": ["gmail", "mcp", "claude", "anthropic", "model-context-protocol", "email"],
+  "author": "Suryansh Gupta",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "googleapis": "^144.0.0",
+    "open": "^10.1.0",
+    "express": "^4.19.2",
+    "zod": "^3.22.4"
+  }
+}
