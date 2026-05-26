@@ -58,11 +58,40 @@ const SCOPES = [
 
 const GOOGLE_REDIRECT = `${BASE_URL}/callback`;
 
-// ─── In-memory stores ─────────────────────────────────────────────────────────
+// ─── In-memory & Persistent stores ──────────────────────────────────────────
 
 const pendingAuth  = new Map(); // authState  → { redirect_uri, state, code_challenge }
 const pendingCodes = new Map(); // authCode   → { accessToken }
 const userTokens   = new Map(); // accessToken → Gmail OAuth tokens
+
+const TOKENS_FILE = path.join(os.homedir(), ".gmail-mcp", "http_tokens.json");
+
+function saveUserTokens() {
+  try {
+    const dir = path.dirname(TOKENS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const data = Object.fromEntries(userTokens.entries());
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(data, null, 2), "utf8");
+  } catch (err) {
+    console.error("Error saving user tokens:", err);
+  }
+}
+
+function loadUserTokens() {
+  try {
+    if (fs.existsSync(TOKENS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf8"));
+      for (const [key, val] of Object.entries(data)) {
+        userTokens.set(key, val);
+      }
+    }
+  } catch (err) {
+    console.error("Error loading user tokens:", err);
+  }
+}
+
+// Load persisted tokens at startup
+loadUserTokens();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,9 +99,18 @@ function makeGoogleClient() {
   return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, GOOGLE_REDIRECT);
 }
 
-function buildAuthForUser(gmailTokens) {
+function buildAuthForUser(accessToken, gmailTokens) {
   const client = makeGoogleClient();
   client.setCredentials(gmailTokens);
+  
+  // Auto-refresh and persist new token
+  client.on("tokens", (t) => {
+    const current = userTokens.get(accessToken) || {};
+    const updated = { ...current, ...t };
+    userTokens.set(accessToken, updated);
+    saveUserTokens();
+  });
+  
   return client;
 }
 
@@ -95,7 +133,7 @@ function getAuthFromRequest(req, res) {
     return null;
   }
 
-  return buildAuthForUser(userTokens.get(token));
+  return buildAuthForUser(token, userTokens.get(token));
 }
 
 // ─── Express ──────────────────────────────────────────────────────────────────
@@ -219,6 +257,7 @@ app.get("/callback", async (req, res) => {
     // Create our Bearer token for claude.ai
     const accessToken = crypto.randomBytes(32).toString("hex");
     userTokens.set(accessToken, gmailTokens);
+    saveUserTokens();
 
     // Get user email for display
     client.setCredentials(gmailTokens);
