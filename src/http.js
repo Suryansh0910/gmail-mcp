@@ -561,7 +561,7 @@ SUPPORTED FILE TYPES:
       }
     });
 
-
+  return server;
 }
 
 // ─── StreamableHTTP MCP endpoints ────────────────────────────────────────────
