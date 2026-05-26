@@ -141,6 +141,16 @@ function getAuthFromRequest(req, res) {
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => {
+  console.log(`[HTTP] ${req.method} ${req.path}`, {
+    query: req.query,
+    headers: {
+      "mcp-session-id": req.headers["mcp-session-id"],
+      "authorization": req.headers["authorization"] ? "present" : "absent"
+    }
+  });
+  next();
+});
 app.use((_, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
