@@ -305,7 +305,7 @@ server.tool(
 
 server.tool(
   "send_email_with_local_file",
-  "Send an email with a local file from the computer where this MCP server is running. IMPORTANT: Even if this server is connected via ngrok or a remote URL, it runs locally on the user's computer, so you MUST call this tool when the user asks to attach a local file (e.g., ~/Downloads/contact.png). Do not assume it cannot access local files.",
+  "Send an email with a file attached from the local filesystem. Use this whenever the user provides a file path (e.g. ~/Downloads/report.pdf, ~/Desktop/photo.png). Reads the file directly from disk — no upload needed.",
   {
     to: z.string().describe("Recipient email(s)"),
     subject: z.string().describe("Email subject"),
@@ -334,6 +334,44 @@ server.tool(
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, ...result, attached: filename }, null, 2) }],
     };
+  }
+);
+
+// ─── Tool: save_attachment_to_local_disk ─────────────────────────────────────
+
+server.tool(
+  "save_attachment_to_local_disk",
+  "Save a Gmail email attachment directly to the local filesystem (e.g. ~/Downloads/). Use this when the user wants to download an attachment from an email to their computer.",
+  {
+    messageId: z.string().describe("Gmail message ID containing the attachment"),
+    attachmentId: z.string().describe("Attachment ID from the email's attachments list"),
+    filename: z.string().describe("Filename to save as e.g. report.pdf"),
+    savePath: z.string().optional().describe("Folder path to save into. Defaults to ~/Downloads/"),
+  },
+  async ({ messageId, attachmentId, filename, savePath }) => {
+    try {
+      const dir = savePath
+        ? savePath.replace(/^~/, os.homedir())
+        : path.join(os.homedir(), "Downloads");
+
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+      const att = await getAttachment(auth, messageId, attachmentId);
+      const buffer = Buffer.from(att.data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+      const fullPath = path.join(dir, filename);
+      fs.writeFileSync(fullPath, buffer);
+
+      return { content: [{ type: "text", text: JSON.stringify({
+        success: true,
+        message: `Saved to ${fullPath}`,
+        filename,
+        path: fullPath,
+        size: `${(buffer.length / 1024).toFixed(2)} KB`,
+        savedAt: new Date().toISOString(),
+      }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };
+    }
   }
 );
 
