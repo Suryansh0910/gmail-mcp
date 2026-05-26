@@ -18,9 +18,11 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import os from "os";
 import {
   listMessages, getMessage, getAttachment, sendEmail,
   listLabels, modifyLabels, trashMessage, getProfile, listThreads,
+  fetchAttachmentFromUrl,
 } from "./gmail.js";
 
 // ─── Load .env ────────────────────────────────────────────────────────────────
@@ -34,8 +36,8 @@ if (fs.existsSync(envPath)) {
   });
 }
 
-const CLIENT_ID = process.env.GMAIL_CLIENT_ID;
-const CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
+const CLIENT_ID = process.env.WEB_CLIENT_ID;
+const CLIENT_SECRET = process.env.WEB_CLIENT_SECRET;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
 const PORT = process.env.PORT || 3000;
 
@@ -72,8 +74,16 @@ function buildAuthForUser(gmailTokens) {
 }
 
 function getAuthFromRequest(req, res) {
+  // Check Authorization header first
+  let token = "";
   const header = req.headers["authorization"] || "";
-  const token  = header.startsWith("Bearer ") ? header.slice(7) : null;
+  
+  if (header.startsWith("Bearer ")) {
+    token = header.slice(7);
+  } else if (req.query?.token) {
+    // Fall back to query parameter (from ?token=...)
+    token = req.query.token;
+  }
 
   if (!token || !userTokens.has(token)) {
     res.status(401)
@@ -98,6 +108,57 @@ app.use((_, res, next) => {
 });
 app.options("*", (_, res) => res.sendStatus(200));
 
+// ─── Landing page ─────────────────────────────────────────────────────────────
+
+app.get("/", (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <title>Gmail MCP — Connect your Gmail to Claude</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, sans-serif; background: #f5f5f5; min-height: 100vh;
+           display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .card { background: white; border-radius: 16px; padding: 48px 40px; max-width: 480px;
+            width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; }
+    .icon { font-size: 3rem; margin-bottom: 16px; }
+    h1 { font-size: 1.6rem; font-weight: 700; color: #111; margin-bottom: 8px; }
+    p { color: #666; font-size: 0.95rem; line-height: 1.6; margin-bottom: 32px; }
+    .btn { display: flex; align-items: center; justify-content: center; gap: 12px;
+           background: white; border: 2px solid #e0e0e0; border-radius: 10px;
+           padding: 14px 24px; font-size: 1rem; font-weight: 500; color: #333;
+           text-decoration: none; transition: all 0.2s; cursor: pointer; width: 100%; }
+    .btn:hover { border-color: #4285f4; color: #4285f4; box-shadow: 0 2px 12px rgba(66,133,244,0.15); }
+    .btn img { width: 22px; height: 22px; }
+    .features { display: flex; flex-direction: column; gap: 8px; margin-top: 32px;
+                text-align: left; border-top: 1px solid #f0f0f0; padding-top: 28px; }
+    .feature { display: flex; align-items: center; gap: 10px; font-size: 0.88rem; color: #555; }
+    .dot { width: 6px; height: 6px; background: #4285f4; border-radius: 50%; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">📧</div>
+    <h1>Gmail for Claude</h1>
+    <p>Connect your Gmail account to Claude AI. Read, send, search and manage your emails using natural language.</p>
+
+    <a href="/auth/login" class="btn">
+      <img src="https://www.google.com/favicon.ico" alt="Google">
+      Continue with Google
+    </a>
+
+    <div class="features">
+      <div class="feature"><div class="dot"></div>Read and search your emails</div>
+      <div class="feature"><div class="dot"></div>Send emails and attachments</div>
+      <div class="feature"><div class="dot"></div>Manage labels and threads</div>
+      <div class="feature"><div class="dot"></div>Each user connects their own Gmail</div>
+      <div class="feature"><div class="dot"></div>We never store your password</div>
+    </div>
+  </div>
+</body>
+</html>`);
+});
+
 // ─── MCP OAuth Discovery ──────────────────────────────────────────────────────
 // claude.ai reads this to know how to trigger login
 
@@ -116,19 +177,24 @@ app.get("/.well-known/oauth-authorization-server", (_, res) => {
 // ─── OAuth: Authorization endpoint ───────────────────────────────────────────
 // claude.ai redirects user here → we redirect to Google
 
+// Direct login from landing page
+app.get("/auth/login", (req, res) => {
+  const authState = "direct_" + crypto.randomBytes(16).toString("hex");
+  pendingAuth.set(authState, { redirect_uri: `${BASE_URL}/success`, state: null });
+  const googleAuthUrl = makeGoogleClient().generateAuthUrl({
+    access_type: "offline", scope: SCOPES, prompt: "consent", state: authState,
+  });
+  res.redirect(googleAuthUrl);
+});
+
+// MCP OAuth authorize (used by claude.ai automatically)
 app.get("/authorize", (req, res) => {
   const { redirect_uri, state, code_challenge, code_challenge_method } = req.query;
   const authState = crypto.randomBytes(16).toString("hex");
-
   pendingAuth.set(authState, { redirect_uri, state, code_challenge, code_challenge_method });
-
   const googleAuthUrl = makeGoogleClient().generateAuthUrl({
-    access_type: "offline",
-    scope: SCOPES,
-    prompt: "consent",
-    state: authState,
+    access_type: "offline", scope: SCOPES, prompt: "consent", state: authState,
   });
-
   res.redirect(googleAuthUrl);
 });
 
@@ -162,12 +228,103 @@ app.get("/callback", async (req, res) => {
     pendingAuth.delete(authState);
 
     // Redirect back to claude.ai with the code
-    const redirectUrl = new URL(pending.redirect_uri);
-    redirectUrl.searchParams.set("code", authCode);
-    if (pending.state) redirectUrl.searchParams.set("state", pending.state);
+    if (pending.redirect_uri && !pending.redirect_uri.endsWith("/success")) {
+      const redirectUrl = new URL(pending.redirect_uri);
+      redirectUrl.searchParams.set("code", authCode);
+      if (pending.state) redirectUrl.searchParams.set("state", pending.state);
+      process.stderr.write(`[gmail-mcp] ✅ ${profile.data.emailAddress} authorized\n`);
+      res.redirect(redirectUrl.toString());
+    } else {
+      // Direct login - show success page
+      process.stderr.write(`[gmail-mcp] ✅ ${profile.data.emailAddress} authorized\n`);
+      const serverUrlWithToken = `${BASE_URL}/mcp?token=${accessToken}`;
+      res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <title>Authorization Successful</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, sans-serif; background: #f5f5f5; min-height: 100vh;
+           display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .card { background: white; border-radius: 16px; padding: 48px 40px; max-width: 520px;
+            width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .success-icon { font-size: 3rem; margin-bottom: 16px; text-align: center; }
+    h1 { font-size: 1.6rem; font-weight: 700; color: #111; margin-bottom: 8px; text-align: center; }
+    p { color: #666; font-size: 0.95rem; line-height: 1.6; }
+    .email { color: #4285f4; font-weight: 600; margin: 16px 0; text-align: center; }
+    .section { margin-top: 32px; }
+    .section-title { font-size: 0.85rem; font-weight: 600; color: #999; text-transform: uppercase; margin-bottom: 12px; }
+    .code-block { background: #f5f5f5; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px;
+                  font-family: 'Courier New', monospace; font-size: 0.85rem; color: #333;
+                  word-break: break-all; cursor: pointer; transition: all 0.2s; min-height: 60px;
+                  display: flex; align-items: center; }
+    .code-block:hover { background: #efefef; border-color: #d0d0d0; }
+    .copy-hint { font-size: 0.75rem; color: #999; margin-top: 8px; }
+    .instructions { background: #f0f7ff; border-left: 4px solid #4285f4; padding: 12px; border-radius: 4px;
+                    font-size: 0.9rem; color: #1a5490; margin-top: 8px; }
+    .footer { text-align: center; margin-top: 24px; color: #999; font-size: 0.9rem; border-top: 1px solid #f0f0f0; padding-top: 24px; }
+    .security-note { background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 10px;
+                     font-size: 0.85rem; color: #856404; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="success-icon">✅</div>
+    <h1>Authorization Successful!</h1>
+    <p>You have successfully connected your Gmail account.</p>
+    <div class="email">${profile.data.emailAddress}</div>
 
-    process.stderr.write(`[gmail-mcp] ✅ ${profile.data.emailAddress} authorized\n`);
-    res.redirect(redirectUrl.toString());
+    <div class="section">
+      <div class="section-title">📋 Add to Claude</div>
+      <p style="margin-bottom: 12px;">Copy this URL and add it to Claude's MCP Server settings:</p>
+      <div class="code-block" onclick="navigator.clipboard.writeText('${serverUrlWithToken}'); this.innerHTML='✓ Copied to clipboard!'; setTimeout(() => { this.innerHTML='${serverUrlWithToken}'; }, 2000);">${serverUrlWithToken}</div>
+      <div class="copy-hint">Click to copy</div>
+      <div class="security-note">
+        ⚠️ <strong>Security:</strong> This URL contains your authentication token. Keep it private and don't share it with others.
+      </div>
+      <div class="instructions">
+        <strong>Steps to Add in Claude:</strong><br>
+        1. Go to <strong>claude.ai</strong> or Claude app<br>
+        2. Settings → <strong>Models & Tools</strong><br>
+        3. Select an AI model (e.g., Claude 3.5 Sonnet)<br>
+        4. Scroll to <strong>"MCP Servers"</strong> section<br>
+        5. Click <strong>"Add Server"</strong> or <strong>"Edit Settings"</strong><br>
+        6. Paste the URL above into the "Server URL" field<br>
+        7. Click <strong>"Save" or "Connect"</strong><br>
+        8. Done! You can now ask Claude to read, send, and manage your emails
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">💡 What You Can Do</div>
+      <p style="font-size: 0.9rem; color: #666;">
+        • Read and search emails<br>
+        • Send emails with attachments<br>
+        • Manage labels and threads<br>
+        • Download attachments<br>
+        • Use natural language with Claude to automate email tasks
+      </p>
+    </div>
+
+    <div class="section">
+      <div class="section-title">📎 Sending Emails With Files</div>
+      <p style="font-size: 0.9rem; color: #666;">
+        <strong>💻 Claude Desktop & Code (Direct Filesystem):</strong><br>
+        Tell Claude: "Send ~/Downloads/trail1.pdf to user@example.com"<br>
+        Claude reads the file directly and sends it!<br><br>
+        <strong>🌐 Browser Claude (File Upload):</strong><br>
+        Tell Claude you want to send a file, upload it in chat, and Claude sends it via Gmail.<br><br>
+        <strong>Supported Files:</strong> PDF, CSV, XLSX, DOCX, Images (JPG, PNG), and more!
+      </p>
+    </div>
+
+    <div class="footer">
+      <p>Your Gmail is now connected and ready to use with Claude AI.</p>
+    </div>
+  </div>
+</body>
+</html>`);
+    }
   } catch (e) {
     res.status(500).send("Authorization failed: " + e.message);
   }
@@ -208,6 +365,32 @@ function buildMcpServer(auth) {
     return { content: [{ type: "text", text: JSON.stringify(p, null, 2) }] };
   });
 
+  server.tool("help_send_email_with_attachment", "Get instructions on how to send an email with a file attachment.", {}, async () => {
+    return { content: [{ type: "text", text: `📧 HOW TO SEND EMAIL WITH ATTACHMENT:
+
+⭐ EASIEST METHOD (Claude Desktop & Code):
+Use the 'send_email_with_local_file' tool to send files directly from your computer:
+- Tell me: "Send ~/Downloads/report.pdf to user@example.com"
+- I'll read the file and send it as an attachment!
+- Supports: ~/Downloads/file.pdf, /Users/username/Documents/file.doc, etc.
+
+Example:
+"Send ~/Downloads/trail1.csv to chhotaladu@gmail.com with subject 'Here is the data'"
+
+ALTERNATIVE (Web Chat):
+If using browser-based Claude, use 'send_email_with_file':
+1. Upload file in chat (paperclip icon)
+2. I'll send it with the base64-encoded content
+
+SUPPORTED FILE TYPES:
+- Documents: PDF, DOCX, DOC, XLS, XLSX, PPT, PPTX
+- Images: JPG, PNG, GIF, BMP
+- Data: CSV, JSON, XML
+- Archives: ZIP, RAR
+- And any other file type!
+` }] };
+  });
+
   server.tool("list_emails", "Fetch emails from Gmail inbox. Supports Gmail search syntax.", {
     query: z.string().optional().default(""),
     maxResults: z.number().int().min(1).max(50).optional().default(10),
@@ -226,14 +409,21 @@ function buildMcpServer(auth) {
     return { content: [{ type: "text", text: JSON.stringify(await getMessage(auth, messageId), null, 2) }] };
   });
 
-  server.tool("send_email", "Send an email from your Gmail account.", {
+  server.tool("send_email", "Send an email from your Gmail account. Supports attachments.", {
     to: z.string(), subject: z.string(), body: z.string(),
     cc: z.string().optional(), bcc: z.string().optional(),
     replyToMessageId: z.string().optional(),
+    attachments: z.array(z.object({
+      filename: z.string().describe("File name e.g. report.pdf"),
+      mimeType: z.string().describe("MIME type e.g. application/pdf, image/png"),
+      data: z.string().describe("Base64-encoded file content"),
+    })).optional().default([]).describe("Files to attach to the email"),
   }, async (args) => {
     const r = await sendEmail(auth, args);
     return { content: [{ type: "text", text: JSON.stringify({ success: true, ...r }, null, 2) }] };
   });
+
+
 
   server.tool("search_emails", "Search emails using Gmail search syntax.", {
     query: z.string(),
@@ -265,6 +455,17 @@ function buildMcpServer(auth) {
     maxResults: z.number().int().min(1).max(50).optional().default(10),
   }, async ({ query, maxResults }) => {
     return { content: [{ type: "text", text: JSON.stringify(await listThreads(auth, { query, maxResults }), null, 2) }] };
+  });
+
+  server.tool("send_email_with_url_attachment", "Send an email with a file from a URL attached (image, PDF, doc). Server downloads it directly.", {
+    to: z.string(), subject: z.string(), body: z.string(),
+    attachmentUrl: z.string().describe("Public URL of the file to attach"),
+    filename: z.string().optional(),
+    cc: z.string().optional(), bcc: z.string().optional(),
+  }, async ({ to, subject, body, attachmentUrl, filename, cc, bcc }) => {
+    const attachment = await fetchAttachmentFromUrl(attachmentUrl, filename);
+    const r = await sendEmail(auth, { to, subject, body, cc, bcc, attachments: [attachment] });
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, ...r, attached: attachment.filename }, null, 2) }] };
   });
 
   server.tool("download_attachment", "Download an email attachment as base64.", {

@@ -10,6 +10,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import fs from "fs";
+import path from "path";
+import os from "os";
 import {
   buildAuth,
   listMessages,
@@ -21,6 +24,7 @@ import {
   trashMessage,
   getProfile,
   listThreads,
+  fetchAttachmentFromUrl,
 } from "./gmail.js";
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -146,7 +150,7 @@ server.tool(
 
 server.tool(
   "send_email",
-  "Send an email from your Gmail account. Supports plain text body, CC, BCC, and reply-to-thread.",
+  "Send an email from your Gmail account. Supports plain text body, CC, BCC, reply-to-thread, and file attachments.",
   {
     to: z.string().describe("Recipient email(s). Multiple: 'a@x.com, b@x.com'"),
     subject: z.string().describe("Email subject line"),
@@ -154,9 +158,14 @@ server.tool(
     cc: z.string().optional().describe("CC recipients (comma-separated)"),
     bcc: z.string().optional().describe("BCC recipients (comma-separated)"),
     replyToMessageId: z.string().optional().describe("Message ID to reply to (keeps thread)"),
+    attachments: z.array(z.object({
+      filename: z.string().describe("File name e.g. report.pdf"),
+      mimeType: z.string().describe("MIME type e.g. application/pdf, image/png"),
+      data: z.string().describe("Base64-encoded file content"),
+    })).optional().default([]).describe("Files to attach to the email"),
   },
-  async ({ to, subject, body, cc, bcc, replyToMessageId }) => {
-    const result = await sendEmail(auth, { to, subject, body, cc, bcc, replyToMessageId });
+  async ({ to, subject, body, cc, bcc, replyToMessageId, attachments }) => {
+    const result = await sendEmail(auth, { to, subject, body, cc, bcc, replyToMessageId, attachments });
     return {
       content: [{
         type: "text",
@@ -265,6 +274,65 @@ Common patterns:
         type: "text",
         text: JSON.stringify(msgs, null, 2),
       }],
+    };
+  }
+);
+
+// ─── Tool: send_email_with_url_attachment ─────────────────────────────────────
+
+server.tool(
+  "send_email_with_url_attachment",
+  "Send an email with a file attached from a URL (image, PDF, doc, etc). The server downloads the file directly — no base64 needed.",
+  {
+    to: z.string().describe("Recipient email(s)"),
+    subject: z.string().describe("Email subject"),
+    body: z.string().describe("Email body"),
+    attachmentUrl: z.string().describe("Public URL of the file to attach (image, PDF, etc)"),
+    filename: z.string().optional().describe("Override filename for the attachment"),
+    cc: z.string().optional(),
+    bcc: z.string().optional(),
+  },
+  async ({ to, subject, body, attachmentUrl, filename, cc, bcc }) => {
+    const attachment = await fetchAttachmentFromUrl(attachmentUrl, filename);
+    const result = await sendEmail(auth, { to, subject, body, cc, bcc, attachments: [attachment] });
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, ...result, attached: attachment.filename }, null, 2) }],
+    };
+  }
+);
+
+// ─── Tool: send_email_with_local_file ────────────────────────────────────────
+
+server.tool(
+  "send_email_with_local_file",
+  "Send an email with a local file from the computer where this MCP server is running. IMPORTANT: Even if this server is connected via ngrok or a remote URL, it runs locally on the user's computer, so you MUST call this tool when the user asks to attach a local file (e.g., ~/Downloads/contact.png). Do not assume it cannot access local files.",
+  {
+    to: z.string().describe("Recipient email(s)"),
+    subject: z.string().describe("Email subject"),
+    body: z.string().describe("Email body"),
+    filePath: z.string().describe("Path to the file on your computer e.g. ~/Downloads/report.pdf"),
+    cc: z.string().optional(),
+    bcc: z.string().optional(),
+  },
+  async ({ to, subject, body, filePath, cc, bcc }) => {
+    const resolvedPath = filePath.replace(/^~/, os.homedir());
+    if (!fs.existsSync(resolvedPath)) {
+      return { content: [{ type: "text", text: `File not found: ${resolvedPath}` }] };
+    }
+    const data = fs.readFileSync(resolvedPath).toString("base64");
+    const filename = path.basename(resolvedPath);
+    const ext = path.extname(filename).toLowerCase();
+    const mimeTypes = {
+      ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+      ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".txt": "text/plain", ".csv": "text/csv", ".zip": "application/zip",
+    };
+    const mimeType = mimeTypes[ext] || "application/octet-stream";
+    const result = await sendEmail(auth, { to, subject, body, cc, bcc, attachments: [{ filename, mimeType, data }] });
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, ...result, attached: filename }, null, 2) }],
     };
   }
 );

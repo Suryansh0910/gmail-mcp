@@ -2,6 +2,8 @@ import { google } from "googleapis";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import https from "https";
+import http from "http";
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const CONFIG_DIR = path.join(os.homedir(), ".gmail-mcp");
@@ -126,8 +128,48 @@ export async function getAttachment(auth, messageId, attachmentId) {
   };
 }
 
+// Fetch a file from a URL and return as base64 attachment
+export async function fetchAttachmentFromUrl(url, filename) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith("https") ? https : http;
+    client.get(url, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        const mimeType = res.headers["content-type"]?.split(";")[0] || "application/octet-stream";
+        resolve({
+          filename: filename || url.split("/").pop() || "attachment",
+          mimeType,
+          data: buffer.toString("base64"),
+        });
+      });
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+// Auto-compress images that are too large (>1MB base64)
+async function compressIfNeeded(att) {
+  if (!att.mimeType?.startsWith("image/") || att.data.length < 5_000_000) return att;
+  try {
+    const { default: sharp } = await import("sharp");
+    const buffer = Buffer.from(att.data, "base64");
+    const compressed = await sharp(buffer)
+      .resize({ width: 2048, withoutEnlargement: true })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    return { ...att, mimeType: "image/jpeg", data: compressed.toString("base64") };
+  } catch {
+    return att;
+  }
+}
+
 export async function sendEmail(auth, { to, cc, bcc, subject, body, replyToMessageId, attachments = [] }) {
   const g = gmail(auth);
+
+  // Compress oversized images before sending
+  attachments = await Promise.all(attachments.map(compressIfNeeded));
 
   // Build MIME message
   const boundary = "gmail_mcp_" + Date.now();

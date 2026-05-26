@@ -1,3 +1,4 @@
+
 {
   "session": {
     "title": "Gmail MCP Server — Build Session",
@@ -241,7 +242,67 @@
     { "name": "express", "purpose": "HTTP server for web transport" },
     { "name": "zod", "purpose": "Input validation for MCP tools" },
     { "name": "open", "purpose": "Opens browser for OAuth flow" },
-    { "name": "ngrok", "purpose": "Exposes local server to public internet" }
+    { "name": "ngrok", "purpose": "Exposes local server to public internet" },
+    { "name": "sharp", "purpose": "Auto-compress oversized images before attaching to emails" }
+  ],
+
+  "additional_phases": [
+    {
+      "phase": 10,
+      "title": "MCP OAuth Protocol Implementation",
+      "summary": "Founder feedback: flow was too complicated. Rebuilt http.js to implement the MCP OAuth protocol so claude.ai handles the login journey natively. User just adds the URL to claude.ai connector and clicks 'Login with Google' — no token copying or landing pages.",
+      "founder_feedback": "Too complicated. Put URL in claude.ai → claude.ai takes you on login journey → user does ok/login → end of flow → Gmail works in Claude",
+      "endpoints_added": [
+        "GET /.well-known/oauth-authorization-server — OAuth discovery metadata for claude.ai",
+        "GET /authorize — Redirects user to Google OAuth",
+        "GET /callback — Exchanges Google code for Gmail tokens, redirects back to claude.ai",
+        "POST /token — claude.ai exchanges auth code for Bearer token"
+      ],
+      "how_it_works": "claude.ai reads the OAuth discovery endpoint, triggers the Google login flow automatically, stores the Bearer token, and includes it in all future MCP requests. Server looks up the token to find the user's Gmail credentials.",
+      "status": "completed"
+    },
+    {
+      "phase": 11,
+      "title": "Credential Split — Desktop vs Web OAuth Client",
+      "summary": "Separated credentials into two OAuth clients: Desktop client for local auth (auth.js / Claude Desktop) and Web application client for HTTP server (http.js / claude.ai web). This was needed because Web application clients require custom redirect URIs and Desktop clients work better with localhost.",
+      "env_structure": {
+        "GMAIL_CLIENT_ID": "Desktop OAuth client — used by auth.js and index.js",
+        "GMAIL_CLIENT_SECRET": "Desktop OAuth client secret",
+        "WEB_CLIENT_ID": "Web application OAuth client — used by http.js",
+        "WEB_CLIENT_SECRET": "Web application OAuth client secret",
+        "BASE_URL": "Public ngrok URL for the HTTP server"
+      },
+      "issues_faced": [
+        {
+          "issue": "Web application client failing with localhost auth",
+          "error": "Something went wrong — Google OAuth error on localhost",
+          "fix": "Used Desktop client for local auth, Web client only for HTTP server"
+        }
+      ],
+      "status": "completed"
+    },
+    {
+      "phase": 12,
+      "title": "Attachment Support — Images and PDFs",
+      "summary": "Added file attachment support to send_email tool. Also added send_email_with_url_attachment tool so users can attach files by providing a URL (server downloads directly). Added auto-compression for large images using sharp.",
+      "tools_added": [
+        "send_email — updated with attachments[] parameter (filename, mimeType, base64 data)",
+        "send_email_with_url_attachment — new tool, server fetches file from URL directly"
+      ],
+      "issues_faced": [
+        {
+          "issue": "Large images timing out",
+          "cause": "Claude times out trying to pass large base64 images through MCP tool calls",
+          "fix": "Added sharp auto-compression (resize to 1200px, 75% JPEG quality) for images over 1MB"
+        },
+        {
+          "issue": "PDFs not being processed",
+          "cause": "Same MCP payload size limitation",
+          "fix": "Added send_email_with_url_attachment tool — server downloads file from URL, bypassing Claude's payload limit entirely"
+        }
+      ],
+      "status": "completed"
+    }
   ],
 
   "pending_tasks": [
