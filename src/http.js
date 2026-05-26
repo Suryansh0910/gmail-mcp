@@ -412,78 +412,28 @@ SUPPORTED FILE TYPES:
     return { content: [{ type: "text", text: JSON.stringify(await getMessage(auth, messageId), null, 2) }] };
   });
 
-  server.tool("send_email", "Send an email from your Gmail account. Supports attachments.", {
-    to: z.string(), subject: z.string(), body: z.string(),
+  server.tool("send_email",
+    `Send an email from your Gmail account. Supports plain text body, CC, BCC, reply-to-thread, and file attachments.
+
+IMPORTANT - File Attachments:
+This connector runs on a remote cloud server and CANNOT access the user's local filesystem (e.g. ~/Downloads/ or C:\\Users\\...).
+If the user mentions a local file path, DO NOT attempt to read it. Instead, respond with:
+"I can't access files on your computer directly. Please upload the file here in the chat (use the paperclip/attachment icon), and I'll send it as an email attachment right away!"
+Once the user uploads the file in the chat, you will receive its content — encode it as base64 and pass it in the attachments array.`,
+    {
+    to: z.string().describe("Recipient email(s). Multiple: 'a@x.com, b@x.com'"),
+    subject: z.string().describe("Email subject line"),
+    body: z.string().describe("Plain text email body"),
     cc: z.string().optional(), bcc: z.string().optional(),
     replyToMessageId: z.string().optional(),
     attachments: z.array(z.object({
       filename: z.string().describe("File name e.g. report.pdf"),
       mimeType: z.string().describe("MIME type e.g. application/pdf, image/png"),
-      data: z.string().describe("Base64-encoded file content"),
-    })).optional().default([]).describe("Files to attach to the email"),
+      data: z.string().describe("Base64-encoded file content (from uploaded file in chat)"),
+    })).optional().default([]).describe("Files to attach — must be base64-encoded content from files uploaded in chat"),
   }, async (args) => {
     const r = await sendEmail(auth, args);
     return { content: [{ type: "text", text: JSON.stringify({ success: true, ...r }, null, 2) }] };
-  });
-
-  server.tool("send_email_with_local_file", "Send an email with a local file from the computer where this MCP server is running. IMPORTANT: Even if this server is connected via ngrok or a remote URL, it runs locally on the user's computer, so you MUST call this tool when the user asks to attach a local file (e.g., ~/Downloads/contact.png). Do not assume it cannot access local files.", {
-    to: z.string().describe("Recipient email address (e.g. user@example.com)"),
-    subject: z.string().describe("Email subject line"),
-    body: z.string().describe("Email body/message text"),
-    filePath: z.string().describe("Full path to the file on your computer (e.g. ~/Downloads/report.pdf or /Users/username/Downloads/file.csv). Supports ~ for home directory"),
-    cc: z.string().optional().describe("CC recipient email address (optional)"),
-    bcc: z.string().optional().describe("BCC recipient email address (optional)"),
-  }, async ({ to, subject, body, filePath, cc, bcc }) => {
-    try {
-      // Expand ~ to home directory
-      const expandedPath = filePath.startsWith("~") ? path.join(os.homedir(), filePath.slice(1)) : filePath;
-      
-      // Check if file exists
-      if (!fs.existsSync(expandedPath)) {
-        return { content: [{ type: "text", text: JSON.stringify({ 
-          success: false,
-          error: `File not found: ${expandedPath}`
-        }, null, 2) }], isError: true };
-      }
-      
-      // Read file and convert to base64
-      const fileContent = fs.readFileSync(expandedPath);
-      const base64Data = fileContent.toString("base64");
-      
-      // Get filename from path
-      const filename = path.basename(expandedPath);
-      
-      // Detect MIME type
-      const ext = path.extname(filename).toLowerCase();
-      const mimeTypes = {
-        ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
-        ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ".txt": "text/plain", ".csv": "text/csv", ".zip": "application/zip",
-      };
-      const mimeType = mimeTypes[ext] || "application/octet-stream";
-      
-      // Send email
-      const r = await sendEmail(auth, {
-        to, subject, body, cc, bcc,
-        attachments: [{ filename, mimeType, data: base64Data }],
-      });
-      
-      return { content: [{ type: "text", text: JSON.stringify({ 
-        success: true, 
-        message: `✅ Email successfully sent to ${to}`,
-        attachment: filename,
-        size: `${(fileContent.length / 1024).toFixed(2)} KB`,
-        sentAt: new Date().toISOString(),
-        ...r 
-      }, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: JSON.stringify({ 
-        success: false,
-        error: error.message
-      }, null, 2) }], isError: true };
-    }
   });
 
 
