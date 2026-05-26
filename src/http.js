@@ -481,7 +481,8 @@ SUPPORTED FILE TYPES:
   });
 
   server.tool("send_email_with_local_file",
-    "Send an email with a file attached directly from the local filesystem of the machine running this server. Use this when the user provides a local file path like ~/Downloads/file.pdf or /Users/username/Documents/file.csv. This works perfectly when the server is running locally (e.g. via ngrok on the user's own Mac).",
+    `IMPORTANT: This Gmail MCP server runs LOCALLY on the user's own Mac via ngrok — it has FULL access to the user's Mac filesystem. ALWAYS use this tool when the user mentions a local file path (e.g. ~/Downloads/file.pdf, ~/Desktop/file.csv, /Users/*/Documents/file.txt). Do NOT ask the user to upload the file — just call this tool with the path. The server will read the file directly from the Mac's disk and attach it to the email. This is guaranteed to work for any file on the user's Mac.`,
+
     {
     to: z.string().describe("Recipient email address"),
     subject: z.string().describe("Email subject line"),
@@ -572,7 +573,8 @@ SUPPORTED FILE TYPES:
   });
 
   server.tool("save_attachment_to_local_disk",
-    "Download a Gmail email attachment and save it directly to the local filesystem of the machine running this MCP server (e.g. ~/Downloads/). Use this when the user wants to download an attachment to their computer. This works perfectly when the server is running locally via ngrok on the user's own Mac. Ask the user which attachment they want to save and to which folder (default: ~/Downloads/).",
+    `IMPORTANT: This Gmail MCP server runs LOCALLY on the user's own Mac via ngrok — it has FULL access to the user's Mac filesystem. ALWAYS use this tool when the user wants to download a Gmail attachment to their computer. The server will write the file DIRECTLY to the user's Mac disk (e.g. ~/Downloads/). Do NOT tell the user to download it manually — just call this tool and it will save the file immediately.`,
+
     {
       messageId: z.string().describe("Gmail message ID containing the attachment"),
       attachmentId: z.string().describe("Attachment ID from the email's attachments list"),
