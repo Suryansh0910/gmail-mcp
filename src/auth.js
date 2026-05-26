@@ -12,9 +12,21 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const CONFIG_DIR = path.join(os.homedir(), ".gmail-mcp");
 const TOKEN_PATH = path.join(CONFIG_DIR, "token.json");
-const CREDS_PATH = path.join(CONFIG_DIR, "credentials.json");
+
+// Load .env from project root if present
+const envPath = path.join(__dirname, "..", ".env");
+if (fs.existsSync(envPath)) {
+  fs.readFileSync(envPath, "utf8").split("\n").forEach((line) => {
+    const [key, ...val] = line.split("=");
+    if (key && val.length) process.env[key.trim()] = val.join("=").trim();
+  });
+}
+
+const CLIENT_ID = process.env.GMAIL_CLIENT_ID;
+const CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
 
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
@@ -26,29 +38,24 @@ const SCOPES = [
 async function main() {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
 
-  if (!fs.existsSync(CREDS_PATH)) {
+  if (!CLIENT_ID || !CLIENT_SECRET) {
     console.error(`
 ╔══════════════════════════════════════════════════════════════╗
-║  credentials.json not found!                                 ║
+║  .env file not found or missing credentials!                 ║
 ║                                                              ║
-║  Steps:                                                      ║
-║  1. Go to https://console.cloud.google.com                   ║
-║  2. Create a project → Enable Gmail API                      ║
-║  3. OAuth consent screen → External → add yourself as tester ║
-║  4. Credentials → OAuth client ID → Desktop app → Download   ║
-║  5. Save the file as:                                        ║
-║     ~/.gmail-mcp/credentials.json                            ║
+║  Create a .env file in the project root:                     ║
+║    GMAIL_CLIENT_ID=your_client_id                            ║
+║    GMAIL_CLIENT_SECRET=your_client_secret                    ║
+║                                                              ║
+║  Get these from whoever shared this repo with you.           ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
     process.exit(1);
   }
 
-  const creds = JSON.parse(fs.readFileSync(CREDS_PATH));
-  const { client_id, client_secret, redirect_uris } = creds.installed || creds.web;
-
   const oauth2Client = new google.auth.OAuth2(
-    client_id,
-    client_secret,
+    CLIENT_ID,
+    CLIENT_SECRET,
     "http://localhost:3141/oauth2callback"
   );
 

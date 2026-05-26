@@ -3,19 +3,28 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const CONFIG_DIR = path.join(os.homedir(), ".gmail-mcp");
 const TOKEN_PATH = path.join(CONFIG_DIR, "token.json");
-const CREDS_PATH = path.join(CONFIG_DIR, "credentials.json");
+
+// Load .env from project root if present
+const envPath = path.join(__dirname, "..", ".env");
+if (fs.existsSync(envPath)) {
+  fs.readFileSync(envPath, "utf8").split("\n").forEach((line) => {
+    const [key, ...val] = line.split("=");
+    if (key && val.length) process.env[key.trim()] = val.join("=").trim();
+  });
+}
+
+const CLIENT_ID = process.env.GMAIL_CLIENT_ID;
+const CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
 
 export function buildAuth() {
-  if (!fs.existsSync(CREDS_PATH)) throw new Error("credentials.json missing — run: node src/auth.js");
+  if (!CLIENT_ID || !CLIENT_SECRET) throw new Error(".env missing GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET — add a .env file");
   if (!fs.existsSync(TOKEN_PATH)) throw new Error("token.json missing — run: node src/auth.js");
 
-  const creds = JSON.parse(fs.readFileSync(CREDS_PATH));
-  const { client_id, client_secret } = creds.installed || creds.web;
   const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
-
-  const oauth2Client = new google.auth.OAuth2(client_id, client_secret, "http://localhost:3141/oauth2callback");
+  const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, "http://localhost:3141/oauth2callback");
   oauth2Client.setCredentials(token);
 
   // Auto-refresh and persist new token
