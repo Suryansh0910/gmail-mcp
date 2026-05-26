@@ -201,7 +201,10 @@ export async function sendEmail(auth, { to, cc, bcc, subject, body, replyToMessa
       parts.push(`Content-Transfer-Encoding: base64`);
       parts.push(`Content-Disposition: attachment; filename="${att.filename}"`);
       parts.push("");
-      parts.push(att.data);
+      // Wrap base64 content to 76 chars/line (RFC 2045 requirement for email MTAs)
+      const clean = att.data.replace(/\s/g, "");
+      const wrapped = clean.match(/.{1,76}/g)?.join("\r\n") || clean;
+      parts.push(wrapped);
     }
     parts.push(`--${boundary}--`);
     mime = headers.join("\r\n") + "\r\n\r\n" + parts.join("\r\n");
