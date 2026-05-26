@@ -38,7 +38,10 @@ if (fs.existsSync(envPath)) {
 
 const CLIENT_ID = process.env.WEB_CLIENT_ID;
 const CLIENT_SECRET = process.env.WEB_CLIENT_SECRET;
-const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+let BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+if (BASE_URL.endsWith("/")) {
+  BASE_URL = BASE_URL.slice(0, -1);
+}
 const PORT = process.env.PORT || 3000;
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
