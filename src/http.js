@@ -413,13 +413,7 @@ SUPPORTED FILE TYPES:
   });
 
   server.tool("send_email",
-    `Send an email from your Gmail account. Supports plain text body, CC, BCC, reply-to-thread, and file attachments.
-
-IMPORTANT - File Attachments:
-This connector runs on a remote cloud server and CANNOT access the user's local filesystem (e.g. ~/Downloads/ or C:\\Users\\...).
-If the user mentions a local file path, DO NOT attempt to read it. Instead, respond with:
-"I can't access files on your computer directly. Please upload the file here in the chat (use the paperclip/attachment icon), and I'll send it as an email attachment right away!"
-Once the user uploads the file in the chat, you will receive its content — encode it as base64 and pass it in the attachments array.`,
+    "Send an email from your Gmail account. Supports plain text body, CC, BCC, reply-to-thread, and file attachments (base64-encoded).",
     {
     to: z.string().describe("Recipient email(s). Multiple: 'a@x.com, b@x.com'"),
     subject: z.string().describe("Email subject line"),
@@ -429,13 +423,52 @@ Once the user uploads the file in the chat, you will receive its content — enc
     attachments: z.array(z.object({
       filename: z.string().describe("File name e.g. report.pdf"),
       mimeType: z.string().describe("MIME type e.g. application/pdf, image/png"),
-      data: z.string().describe("Base64-encoded file content (from uploaded file in chat)"),
-    })).optional().default([]).describe("Files to attach — must be base64-encoded content from files uploaded in chat"),
+      data: z.string().describe("Base64-encoded file content"),
+    })).optional().default([]).describe("Files to attach to the email"),
   }, async (args) => {
     const r = await sendEmail(auth, args);
     return { content: [{ type: "text", text: JSON.stringify({ success: true, ...r }, null, 2) }] };
   });
 
+  server.tool("send_email_with_local_file",
+    "Send an email with a file attached directly from the local filesystem of the machine running this server. Use this when the user provides a local file path like ~/Downloads/file.pdf or /Users/username/Documents/file.csv. This works perfectly when the server is running locally (e.g. via ngrok on the user's own Mac).",
+    {
+    to: z.string().describe("Recipient email address"),
+    subject: z.string().describe("Email subject line"),
+    body: z.string().describe("Email body text"),
+    filePath: z.string().describe("Local file path e.g. ~/Downloads/report.pdf or /Users/username/Downloads/file.csv"),
+    cc: z.string().optional(),
+    bcc: z.string().optional(),
+  }, async ({ to, subject, body, filePath, cc, bcc }) => {
+    try {
+      const expandedPath = filePath.startsWith("~") ? path.join(os.homedir(), filePath.slice(1)) : filePath;
+      if (!fs.existsSync(expandedPath)) {
+        return { content: [{ type: "text", text: JSON.stringify({ success: false, error: `File not found: ${expandedPath}` }, null, 2) }], isError: true };
+      }
+      const fileContent = fs.readFileSync(expandedPath);
+      const base64Data = fileContent.toString("base64");
+      const filename = path.basename(expandedPath);
+      const ext = path.extname(filename).toLowerCase();
+      const mimeTypes = {
+        ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+        ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".txt": "text/plain", ".csv": "text/csv", ".zip": "application/zip",
+      };
+      const mimeType = mimeTypes[ext] || "application/octet-stream";
+      const r = await sendEmail(auth, { to, subject, body, cc, bcc, attachments: [{ filename, mimeType, data: base64Data }] });
+      return { content: [{ type: "text", text: JSON.stringify({
+        success: true,
+        message: `✅ Email sent to ${to} with attachment: ${filename}`,
+        size: `${(fileContent.length / 1024).toFixed(2)} KB`,
+        sentAt: new Date().toISOString(),
+        ...r
+      }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };
+    }
+  });
 
 
   server.tool("search_emails", "Search emails using Gmail search syntax.", {
@@ -481,14 +514,54 @@ Once the user uploads the file in the chat, you will receive its content — enc
     return { content: [{ type: "text", text: JSON.stringify({ success: true, ...r, attached: attachment.filename }, null, 2) }] };
   });
 
-  server.tool("download_attachment", "Download an email attachment as base64.", {
+  server.tool("download_attachment", "Download an email attachment as base64 data.", {
     messageId: z.string(), attachmentId: z.string(), filename: z.string(),
   }, async ({ messageId, attachmentId, filename }) => {
     const att = await getAttachment(auth, messageId, attachmentId);
     return { content: [{ type: "text", text: JSON.stringify({ filename, ...att }, null, 2) }] };
   });
 
-  return server;
+  server.tool("save_attachment_to_local_disk",
+    "Download a Gmail email attachment and save it directly to the local filesystem of the machine running this MCP server (e.g. ~/Downloads/). Use this when the user wants to download an attachment to their computer. This works perfectly when the server is running locally via ngrok on the user's own Mac. Ask the user which attachment they want to save and to which folder (default: ~/Downloads/).",
+    {
+      messageId: z.string().describe("Gmail message ID containing the attachment"),
+      attachmentId: z.string().describe("Attachment ID from the email's attachments list"),
+      filename: z.string().describe("Filename to save as e.g. report.pdf"),
+      savePath: z.string().optional().describe("Local folder path to save into. Defaults to ~/Downloads/"),
+    }, async ({ messageId, attachmentId, filename, savePath }) => {
+      try {
+        // Resolve save directory
+        const dir = savePath
+          ? (savePath.startsWith("~") ? path.join(os.homedir(), savePath.slice(1)) : savePath)
+          : path.join(os.homedir(), "Downloads");
+
+        // Create directory if it doesn't exist
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+        // Download attachment from Gmail
+        const att = await getAttachment(auth, messageId, attachmentId);
+
+        // Decode base64url → buffer
+        const buffer = Buffer.from(att.data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+
+        // Write to disk
+        const fullPath = path.join(dir, filename);
+        fs.writeFileSync(fullPath, buffer);
+
+        return { content: [{ type: "text", text: JSON.stringify({
+          success: true,
+          message: `✅ Saved to ${fullPath}`,
+          filename,
+          path: fullPath,
+          size: `${(buffer.length / 1024).toFixed(2)} KB`,
+          savedAt: new Date().toISOString(),
+        }, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };
+      }
+    });
+
+
 }
 
 // ─── StreamableHTTP MCP endpoints ────────────────────────────────────────────
