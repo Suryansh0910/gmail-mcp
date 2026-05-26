@@ -43,13 +43,60 @@ try {
   process.exit(1);
 }
 
+// ─── Session logger ───────────────────────────────────────────────────────────
+
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+const LOG_FILE = path.join(__dirname, "..", "session-log.json");
+
+function readLog() {
+  try {
+    const data = JSON.parse(fs.readFileSync(LOG_FILE, "utf8"));
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
+}
+
+function logEntry(tool, args, result, error) {
+  const log = readLog();
+  log.push({
+    timestamp: new Date().toISOString(),
+    tool,
+    args,
+    ...(error ? { error: error.message ?? String(error) } : { result }),
+  });
+  fs.writeFileSync(LOG_FILE, JSON.stringify(log, null, 2), "utf8");
+}
+
+function wrap(toolName, fn) {
+  return async (args) => {
+    try {
+      const result = await fn(args);
+      // extract text content for logging (skip large base64 blobs)
+      const text = result?.content?.map(c => {
+        if (c.type !== "text") return c.type;
+        try {
+          const parsed = JSON.parse(c.text);
+          // truncate attachment data fields so log stays readable
+          if (parsed.data) parsed.data = "<base64 omitted>";
+          if (Array.isArray(parsed)) parsed.forEach(m => { if (m.data) m.data = "<base64 omitted>"; });
+          return parsed;
+        } catch { return c.text; }
+      });
+      logEntry(toolName, args, text);
+      return result;
+    } catch (err) {
+      logEntry(toolName, args, null, err);
+      throw err;
+    }
+  };
+}
+
 // ─── Tool: get_profile ────────────────────────────────────────────────────────
 
 server.tool(
   "get_profile",
   "Get your Gmail account profile — email address, total messages, total threads.",
   {},
-  async () => {
+  wrap("get_profile", async () => {
     const profile = await getProfile(auth);
     return {
       content: [{
@@ -57,7 +104,7 @@ server.tool(
         text: JSON.stringify(profile, null, 2),
       }],
     };
-  }
+  })
 );
 
 // ─── Tool: list_emails ───────────────────────────────────────────────────────
@@ -78,7 +125,7 @@ Examples of query values:
     maxResults: z.number().int().min(1).max(50).optional().default(10).describe("Number of emails to return (1–50)"),
     labelIds: z.array(z.string()).optional().default([]).describe("Filter by label IDs e.g. ['INBOX','UNREAD']"),
   },
-  async ({ query, maxResults, labelIds }) => {
+  wrap("list_emails", async ({ query, maxResults, labelIds }) => {
     const msgs = await listMessages(auth, { query, maxResults, labelIds });
     const summary = msgs.map((m) => ({
       id: m.id,
@@ -97,7 +144,7 @@ Examples of query values:
         text: JSON.stringify(summary, null, 2),
       }],
     };
-  }
+  })
 );
 
 // ─── Tool: read_email ────────────────────────────────────────────────────────
@@ -108,15 +155,12 @@ server.tool(
   {
     messageId: z.string().describe("Gmail message ID (from list_emails)"),
   },
-  async ({ messageId }) => {
+  wrap("read_email", async ({ messageId }) => {
     const msg = await getMessage(auth, messageId);
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(msg, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify(msg, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: download_attachment ───────────────────────────────────────────────
@@ -129,21 +173,15 @@ server.tool(
     attachmentId: z.string().describe("Attachment ID from the email's attachments list"),
     filename: z.string().describe("Original filename (for reference)"),
   },
-  async ({ messageId, attachmentId, filename }) => {
+  wrap("download_attachment", async ({ messageId, attachmentId, filename }) => {
     const att = await getAttachment(auth, messageId, attachmentId);
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          filename,
-          size: att.size,
-          mimeType: "application/octet-stream",
-          data: att.data,
-          note: "data is base64url-encoded. Decode it to get the file bytes.",
-        }, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify({
+        filename, size: att.size, mimeType: "application/octet-stream",
+        data: att.data, note: "data is base64url-encoded.",
+      }, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: send_email ────────────────────────────────────────────────────────
@@ -164,15 +202,12 @@ server.tool(
       data: z.string().describe("Base64-encoded file content"),
     })).optional().default([]).describe("Files to attach to the email"),
   },
-  async ({ to, subject, body, cc, bcc, replyToMessageId, attachments }) => {
+  wrap("send_email", async ({ to, subject, body, cc, bcc, replyToMessageId, attachments }) => {
     const result = await sendEmail(auth, { to, subject, body, cc, bcc, replyToMessageId, attachments });
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({ success: true, ...result }, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify({ success: true, ...result }, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: list_labels ───────────────────────────────────────────────────────
@@ -181,15 +216,12 @@ server.tool(
   "list_labels",
   "List all Gmail labels (system labels like INBOX, SENT, SPAM and custom labels you created).",
   {},
-  async () => {
+  wrap("list_labels", async () => {
     const labels = await listLabels(auth);
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(labels, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify(labels, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: label_email ───────────────────────────────────────────────────────
@@ -202,15 +234,12 @@ server.tool(
     addLabels: z.array(z.string()).optional().default([]).describe("Label IDs to add. e.g. ['STARRED'] or ['UNREAD']"),
     removeLabels: z.array(z.string()).optional().default([]).describe("Label IDs to remove. e.g. ['UNREAD'] to mark as read"),
   },
-  async ({ messageId, addLabels, removeLabels }) => {
+  wrap("label_email", async ({ messageId, addLabels, removeLabels }) => {
     const result = await modifyLabels(auth, messageId, { addLabels, removeLabels });
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(result, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: trash_email ───────────────────────────────────────────────────────
@@ -221,15 +250,12 @@ server.tool(
   {
     messageId: z.string().describe("Gmail message ID to trash"),
   },
-  async ({ messageId }) => {
+  wrap("trash_email", async ({ messageId }) => {
     const result = await trashMessage(auth, messageId);
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(result, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: list_threads ──────────────────────────────────────────────────────
@@ -241,15 +267,12 @@ server.tool(
     query: z.string().optional().default("").describe("Gmail search query to filter threads"),
     maxResults: z.number().int().min(1).max(50).optional().default(10).describe("Number of threads (1–50)"),
   },
-  async ({ query, maxResults }) => {
+  wrap("list_threads", async ({ query, maxResults }) => {
     const threads = await listThreads(auth, { query, maxResults });
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(threads, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify(threads, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: search_emails ─────────────────────────────────────────────────────
@@ -267,15 +290,12 @@ Common patterns:
     query: z.string().describe("Full Gmail search query string"),
     maxResults: z.number().int().min(1).max(50).optional().default(10),
   },
-  async ({ query, maxResults }) => {
+  wrap("search_emails", async ({ query, maxResults }) => {
     const msgs = await listMessages(auth, { query, maxResults });
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(msgs, null, 2),
-      }],
+      content: [{ type: "text", text: JSON.stringify(msgs, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: send_email_with_url_attachment ─────────────────────────────────────
@@ -292,13 +312,13 @@ server.tool(
     cc: z.string().optional(),
     bcc: z.string().optional(),
   },
-  async ({ to, subject, body, attachmentUrl, filename, cc, bcc }) => {
+  wrap("send_email_with_url_attachment", async ({ to, subject, body, attachmentUrl, filename, cc, bcc }) => {
     const attachment = await fetchAttachmentFromUrl(attachmentUrl, filename);
     const result = await sendEmail(auth, { to, subject, body, cc, bcc, attachments: [attachment] });
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, ...result, attached: attachment.filename }, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: send_email_with_local_file ────────────────────────────────────────
@@ -314,7 +334,7 @@ server.tool(
     cc: z.string().optional(),
     bcc: z.string().optional(),
   },
-  async ({ to, subject, body, filePath, cc, bcc }) => {
+  wrap("send_email_with_local_file", async ({ to, subject, body, filePath, cc, bcc }) => {
     const resolvedPath = filePath.replace(/^~/, os.homedir());
     if (!fs.existsSync(resolvedPath)) {
       return { content: [{ type: "text", text: `File not found: ${resolvedPath}` }] };
@@ -334,7 +354,7 @@ server.tool(
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, ...result, attached: filename }, null, 2) }],
     };
-  }
+  })
 );
 
 // ─── Tool: save_attachment_to_local_disk ─────────────────────────────────────
@@ -348,7 +368,7 @@ server.tool(
     filename: z.string().describe("Filename to save as e.g. report.pdf"),
     savePath: z.string().optional().describe("Folder path to save into. Defaults to ~/Downloads/"),
   },
-  async ({ messageId, attachmentId, filename, savePath }) => {
+  wrap("save_attachment_to_local_disk", async ({ messageId, attachmentId, filename, savePath }) => {
     try {
       const dir = savePath
         ? savePath.replace(/^~/, os.homedir())
@@ -362,17 +382,15 @@ server.tool(
       fs.writeFileSync(fullPath, buffer);
 
       return { content: [{ type: "text", text: JSON.stringify({
-        success: true,
-        message: `Saved to ${fullPath}`,
-        filename,
-        path: fullPath,
+        success: true, message: `Saved to ${fullPath}`,
+        filename, path: fullPath,
         size: `${(buffer.length / 1024).toFixed(2)} KB`,
         savedAt: new Date().toISOString(),
       }, null, 2) }] };
     } catch (error) {
       return { content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };
     }
-  }
+  })
 );
 
 // ─── Start ────────────────────────────────────────────────────────────────────
